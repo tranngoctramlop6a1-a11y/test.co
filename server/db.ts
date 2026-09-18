@@ -156,7 +156,13 @@ export interface DatabaseSchema {
   userProgress: Record<string, any>; // user_id -> UserProgress
 }
 
-const DB_FILE_PATH = path.join(process.cwd(), 'server_db_store.json');
+const resolveDbFilePath = (): string => {
+  const cwdPath = path.join(process.cwd(), 'server_db_store.json');
+  if (fs.existsSync(cwdPath)) return cwdPath;
+  const relPath = path.resolve(__dirname, '..', 'server_db_store.json');
+  if (fs.existsSync(relPath)) return relPath;
+  return cwdPath;
+};
 
 class Database {
   private data: DatabaseSchema;
@@ -195,8 +201,9 @@ class Database {
 
   private load() {
     try {
-      if (fs.existsSync(DB_FILE_PATH)) {
-        const raw = fs.readFileSync(DB_FILE_PATH, 'utf-8');
+      const dbPath = resolveDbFilePath();
+      if (fs.existsSync(dbPath)) {
+        const raw = fs.readFileSync(dbPath, 'utf-8');
         const parsed = JSON.parse(raw);
         this.data = {
           users: parsed.users || {},
@@ -226,9 +233,12 @@ class Database {
 
   private saveSync() {
     try {
-      fs.writeFileSync(DB_FILE_PATH, JSON.stringify(this.data, null, 2), 'utf-8');
-    } catch (e) {
-      console.error('Failed to write database file:', e);
+      const targetPath = resolveDbFilePath();
+      fs.writeFileSync(targetPath, JSON.stringify(this.data, null, 2), 'utf-8');
+    } catch (e: any) {
+      // In serverless environments like Vercel with read-only filesystems, disk write is skipped
+      // while in-memory operations continue to serve during the function lifecycle.
+      console.warn('Database write to disk skipped (read-only filesystem):', e?.message || e);
     }
   }
 

@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import dotenv from 'dotenv';
 import { db, UserRecord } from './server/db';
 import { classifyChatMessage, CLARIFICATION_PATTERNS } from './server/fastPathRouter';
@@ -16,15 +16,30 @@ const PORT = 3000;
 // Ensure uploads directories exist and serve statically
 const UPLOADS_DIR = path.join(process.cwd(), 'uploads');
 const JOURNAL_UPLOADS_DIR = path.join(UPLOADS_DIR, 'journal');
-if (!fs.existsSync(UPLOADS_DIR)) {
-  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-}
-if (!fs.existsSync(JOURNAL_UPLOADS_DIR)) {
-  fs.mkdirSync(JOURNAL_UPLOADS_DIR, { recursive: true });
+try {
+  if (!fs.existsSync(UPLOADS_DIR)) {
+    fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(JOURNAL_UPLOADS_DIR)) {
+    fs.mkdirSync(JOURNAL_UPLOADS_DIR, { recursive: true });
+  }
+} catch (e: any) {
+  console.warn('Could not initialize uploads directory (read-only filesystem):', e?.message || e);
 }
 
 app.use(cors());
 app.use('/uploads', express.static(UPLOADS_DIR));
+
+// If running in a serverless environment like Vercel where a rewrite might strip the /api prefix,
+// ensure req.url is normalized to begin with /api so all Express route declarations match seamlessly.
+if (process.env.VERCEL) {
+  app.use((req, res, next) => {
+    if (!req.url.startsWith('/api') && !req.url.startsWith('/uploads')) {
+      req.url = '/api' + (req.url.startsWith('/') ? req.url : '/' + req.url);
+    }
+    next();
+  });
+}
 
 app.use((express as any).json({ limit: '10mb' }));
 app.use((express as any).urlencoded({ extended: true, limit: '10mb' }));
@@ -36,7 +51,14 @@ function getGeminiClient(): GoogleGenAI | null {
     return null;
   }
   if (!aiClient) {
-    aiClient = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    aiClient = new GoogleGenAI({
+      apiKey: process.env.GEMINI_API_KEY,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build'
+        }
+      }
+    });
   }
   return aiClient;
 }
@@ -671,48 +693,64 @@ ${lastBotReply || '(Chưa có câu trả lời trước)'}
 
     try {
       let rawResponseText = '';
+      let usedModel = '';
 
-      // 1. Try primary Gemini Flash (gemini-3.8-flash) with dedicated 13s timeout
-      try {
-        const geminiCall = gemini.models.generateContent({
-          model: 'gemini-3.8-flash',
-          contents: formattedContents,
-          config: {
+      // Multi-tier model candidate list with fast failover to prevent timeouts:
+      // 1. Primary: gemini-3.8-flash (with ThinkingLevel.LOW to avoid heavy reasoning delays)
+      // 2. High-throughput fallback: gemini-3.1-flash-lite (fastest, unaffected by flash demand spikes)
+      // 3. Fallback alias: gemini-flash-latest
+      // 4. Lite fallback alias: gemini-flash-lite-latest
+      const candidateModels: Array<{
+        model: string;
+        timeoutMs: number;
+        thinkingLevel?: ThinkingLevel;
+      }> = [
+        { model: 'gemini-3.8-flash', timeoutMs: 7000, thinkingLevel: ThinkingLevel.LOW },
+        { model: 'gemini-3.1-flash-lite', timeoutMs: 9000, thinkingLevel: ThinkingLevel.LOW },
+        { model: 'gemini-flash-latest', timeoutMs: 8000 },
+        { model: 'gemini-flash-lite-latest', timeoutMs: 8000 }
+      ];
+
+      let lastCandidateError: any = null;
+
+      for (const candidate of candidateModels) {
+        try {
+          const config: any = {
             systemInstruction: contextualInstruction,
             temperature: 0.75,
-            maxOutputTokens: 3500,
+            maxOutputTokens: 2500,
+          };
+          if (candidate.thinkingLevel) {
+            config.thinkingConfig = { thinkingLevel: candidate.thinkingLevel };
           }
-        });
 
-        const response = await executeWithIndependentTimeout(
-          geminiCall,
-          13000,
-          'Gemini 3.8 Flash primary call timed out after 13s'
-        );
-        rawResponseText = response.text || '';
-      } catch (primaryError) {
-        console.warn('Primary Gemini Flash (gemini-3.8-flash) failed, retrying with alias (gemini-flash-latest):', primaryError);
-        
-        // 2. Retry with gemini-flash-latest alias with its OWN independent 13s timeout
-        const retryCall = gemini.models.generateContent({
-          model: 'gemini-flash-latest',
-          contents: formattedContents,
-          config: {
-            systemInstruction: contextualInstruction,
-            temperature: 0.75,
-            maxOutputTokens: 3500,
+          const geminiCall = gemini.models.generateContent({
+            model: candidate.model,
+            contents: formattedContents,
+            config
+          });
+
+          const response = await executeWithIndependentTimeout(
+            geminiCall,
+            candidate.timeoutMs,
+            `Gemini model ${candidate.model} call timed out after ${Math.round(candidate.timeoutMs / 1000)}s`
+          );
+
+          if (response?.text && response.text.trim()) {
+            rawResponseText = response.text;
+            usedModel = candidate.model;
+            break;
           }
-        });
-
-        const retryResponse = await executeWithIndependentTimeout(
-          retryCall,
-          13000,
-          'Gemini Flash Latest retry call timed out after 13s'
-        );
-        rawResponseText = retryResponse.text || '';
+        } catch (candErr: any) {
+          lastCandidateError = candErr;
+          console.warn(`Gemini candidate ${candidate.model} failed or timed out:`, candErr?.message || candErr);
+        }
       }
 
       if (!rawResponseText || !rawResponseText.trim()) {
+        if (lastCandidateError) {
+          throw lastCandidateError;
+        }
         return res.status(503).json({
           error: 'AI_EMPTY_RESPONSE',
           message: 'AI chưa trả về nội dung phản hồi. Bạn bấm "Thử lại" nhé! 🫂',
@@ -724,9 +762,9 @@ ${lastBotReply || '(Chưa có câu trả lời trước)'}
         rawResponseText,
         recentResponseMemory?.history
       );
-      return res.json({ reply: replyText, source: 'gemini' });
+      return res.json({ reply: replyText, source: 'gemini', model: usedModel });
     } catch (apiError: any) {
-      console.warn('Gemini API call failed:', apiError);
+      console.warn('All Gemini candidate calls failed:', apiError);
       const isTimeout = apiError?.message?.includes('timed out');
       return res.status(isTimeout ? 504 : 503).json({
         error: isTimeout ? 'AI_TIMEOUT' : 'AI_CONNECTION_ERROR',
@@ -1841,6 +1879,25 @@ app.post('/api/user/progress', requireAuth, (req, res) => {
   }
 });
 
+// Root API status endpoint
+app.get('/api', (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'TeenOi API',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Explicit 404 handler for unmatched /api routes so they are NEVER swallowed by index.html fallback
+app.all('/api/*', (req, res) => {
+  res.status(404).json({
+    success: false,
+    error: 'API_NOT_FOUND',
+    message: `API endpoint ${req.method} ${req.originalUrl || req.url} không tồn tại.`,
+    path: req.originalUrl || req.url
+  });
+});
+
 // Serve frontend: Vite middleware in dev, static files in prod
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
@@ -1854,6 +1911,14 @@ async function startServer() {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
+      // Guard against serving HTML for any /api requests
+      if (req.path.startsWith('/api')) {
+        return res.status(404).json({
+          success: false,
+          error: 'API_NOT_FOUND',
+          path: req.originalUrl || req.url
+        });
+      }
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
@@ -1863,4 +1928,10 @@ async function startServer() {
   });
 }
 
-startServer();
+// Only start standalone HTTP server when NOT running in a serverless environment (e.g. Vercel)
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+export { app };
+export default app;
