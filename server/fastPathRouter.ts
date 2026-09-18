@@ -37,8 +37,8 @@ export interface ChatMessageContext {
   content: string;
 }
 
-// 1. SAFETY SIGNALS (🚨 Priority 1)
-const SAFETY_PATTERNS = [
+// 1. SAFETY SIGNALS (🚨 Priority 1 - Context-aware Life Safety Detection)
+const CRITICAL_SELF_HARM_PATTERNS = [
   /t[ựu]\s*t[ửu]/i,
   /mu[ốo]n\s*ch[ếe]t/i,
   /t[ựu]\s*h[ạa]i/i,
@@ -47,13 +47,38 @@ const SAFETY_PATTERNS = [
   /k[ếe]t\s*th[úu]c\s*cu[ộo]c\s*s[ốo]ng/i,
   /kh[ôo]ng\s*mu[ốo]n\s*s[ốo]ng/i,
   /ch[ếe]t\s*đi\s*cho\s*xong/i,
-  /c[ứu]u\s*(tui|m[ìi]nh|em|tao)/i,
   /(tui|m[ìi]nh|em)\s*mu[ốo]n\s*bi[ếe]n\s*m[ấa]t/i,
   /mu[ốo]n\s*bi[ếe]n\s*m[ấa]t\s*kh[ỏo]i\s*th[ếe]\s*gi[ớo]i/i,
   /nh[ảa]y\s*(c[ầa]u|l[ầa]u)/i,
   /kh[ôo]ng\s*thi[ếe]t\s*s[ốo]ng/i,
   /gi[ảa]i\s*tho[áa]t\s*kh[ỏo]i\s*cu[ộo]c\s*đ[ờo]i/i
 ];
+
+export function isEmergencyQuery(text: string): boolean {
+  const trimmed = text.trim();
+
+  // Academic / homework / gaming / casual study context check:
+  // "Cứu mình với bài tập này", "cứu tui bài toán", "cứu đề cương", "cứu game này"
+  const isStudyOrCasualContext = /(b[àa]i\s*t[ậa]p|b[àa]i\s*to[áa]n|b[àa]i\s*v[ăa]n|b[àa]i\s*v[ởo]|b[àa]i\s*học|c[âa]u\s*n[àa]y|b[àa]i\s*n[àa]y|m[ôo]n|đ[ềe]|to[áa]n|l[ýy]|h[óa]a|v[ăa]n|anh|s[ửu]|đ[ịi]a|deadline|game|tr[òo]\s*ch[ơo]i|ch[ơo]i|k[ỳy]\s*thi|thi\s*c[ửu]|ki[ểe]m\s*tra|đi[ểe]m|l[àa]m\s*sao\s*gi[ảa]i|c[áa]ch\s*gi[ảa]i)/i.test(trimmed);
+
+  // If text is in academic or casual context, do NOT trigger emergency unless explicit self-harm is present
+  if (isStudyOrCasualContext) {
+    return CRITICAL_SELF_HARM_PATTERNS.some((p) => p.test(trimmed));
+  }
+
+  // Check definite self-harm & suicide indicators
+  for (const pattern of CRITICAL_SELF_HARM_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      return true;
+    }
+  }
+
+  // Genuine crisis call: "cứu mình với" with distress or bare urgent cry (not homework/game)
+  const isBareCrisisCry = /^c[ứu]u\s*(tui|m[ìi]nh|em|tao)\s*(v[ớo]i)?[\.!\?]*$/i.test(trimmed);
+  const hasDangerSign = /c[ứu]u\s*(tui|m[ìi]nh|em|tao).*(b[ịi]\s*(đ[áa]nh|b[ạa]o\s*h[àa]nh|nh[ốo]t|đe\s*d[ọo]a)|nguy\s*hi[ểe]m|kh[ôo]ng\s*th[ởo]\s*đ[ư\s]*[ợo]c)/i.test(trimmed);
+
+  return isBareCrisisCry || hasDangerSign;
+}
 
 // 2. CLARIFICATION & EXPLANATION SIGNALS (Section Lỗi 2: YÊU CẦU GIẢI THÍCH / LÀM RÕ)
 // Explicit clarification phrases ("?", "là sao?", "ý là gì?", "sao cơ?", "giải thích đi", "tớ chưa hiểu", etc.)
@@ -483,23 +508,21 @@ export function classifyChatMessage(
   }
 
   // ─────────────────────────────────────────────────────────────
-  // 1. SAFETY MODE (🚨 HIGHEST PRIORITY)
+  // 1. SAFETY MODE (🚨 HIGHEST PRIORITY - Context-aware)
   // ─────────────────────────────────────────────────────────────
-  for (const pattern of SAFETY_PATTERNS) {
-    if (pattern.test(trimmed)) {
-      const safetyResponse = `Mình nghe đây, và mình thực sự rất lo lắng cho bạn. 🫂 Cảm giác kiệt sức và bế tắc lúc này chắc chắn đang đè nặng lên bạn rất nhiều... Nhưng bạn ơi, sự an toàn của bạn là điều quan trọng nhất, và bạn không hề phải chịu đựng điều này một mình đâu.
+  if (isEmergencyQuery(trimmed)) {
+    const safetyResponse = `Mình nghe đây, và mình thực sự rất lo lắng cho bạn. 🫂 Cảm giác kiệt sức và bế tắc lúc này chắc chắn đang đè nặng lên bạn rất nhiều... Nhưng bạn ơi, sự an toàn của bạn là điều quan trọng nhất, và bạn không hề phải chịu đựng điều này một mình đâu.
 
 Mình tha thiết mong bạn hãy mở lòng với một người lớn đáng tin cậy ở gần (bố mẹ, thầy cô, người thân).
 
 Nếu có nguy hiểm khẩn cấp ngay lúc này, hãy gọi cấp cứu **115**.
 
 Mình vẫn ở đây lắng nghe bạn, nhưng hãy để người lớn cùng bảo vệ bạn an toàn nhé! 🌷`;
-      return {
-        decision: 'SAFETY',
-        reason: 'Critical safety concern detected',
-        response: safetyResponse
-      };
-    }
+    return {
+      decision: 'SAFETY',
+      reason: 'Critical safety concern detected',
+      response: safetyResponse
+    };
   }
 
   // ─────────────────────────────────────────────────────────────

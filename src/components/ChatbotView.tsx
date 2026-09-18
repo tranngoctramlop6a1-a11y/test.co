@@ -42,6 +42,7 @@ import {
 } from '../utils/antiRepetitionMemory';
 import { recordDiscussedTopic, unlockBadge } from '../utils/userExperienceStore';
 import { getGentleFallbackResponse } from '../utils/geminiChatFallback';
+import { useAuth } from '../context/AuthContext';
 
 interface ChatbotViewProps {
   onClose?: () => void;
@@ -58,19 +59,34 @@ interface ChatbotViewProps {
   defaultFullscreen?: boolean;
 }
 
-const STORAGE_KEY = 'ban_oi_minh_noi_ne_chat_history';
-const MEMORY_STORAGE_KEY = 'teen_chatbot_anti_rep_memory';
+// Account-isolated storage keys
+export const getChatStorageKey = (uid: string | null) =>
+  uid ? `teen_chat_history_user_${uid}` : `teen_chat_history_guest`;
+export const getMemoryStorageKey = (uid: string | null) =>
+  uid ? `teen_chat_memory_user_${uid}` : `teen_chat_memory_guest`;
 
-// Check if user input indicates risk
+// Check if user input indicates risk (context-aware: study/homework queries are NOT emergencies)
 const checkIsCriticalEmergency = (text: string): boolean => {
-  const lower = text.toLowerCase();
+  const trimmed = text.trim();
+  const lower = trimmed.toLowerCase();
+
+  // Academic / homework / casual study context check
+  const isStudyOrCasualContext = /(b[àa]i\s*t[ậa]p|b[àa]i\s*to[áa]n|b[àa]i\s*v[ăa]n|b[àa]i\s*v[ởo]|b[àa]i\s*học|c[âa]u\s*n[àa]y|b[àa]i\s*n[àa]y|m[ôo]n|đ[ềe]|to[áa]n|l[ýy]|h[óa]a|v[ăa]n|anh|s[ửu]|đ[ịi]a|deadline|game|tr[òo]\s*ch[ơo]i|ch[ơo]i|k[ỳy]\s*thi|thi\s*c[ửu]|ki[ểe]m\s*tra|đi[ểe]m|l[àa]m\s*sao\s*gi[ảa]i|c[áa]ch\s*gi[ảa]i)/i.test(trimmed);
+
+  if (isStudyOrCasualContext) {
+    return /(t[ựu]\s*t[ửu]|mu[ốo]n\s*ch[ếe]t|r[ạa]ch\s*tay|t[ựu]\s*h[ạa]i|nh[ảa]y\s*(c[ầa]u|l[ầa]u)|u[ốo]ng\s*thu[ốo]c\s*(ng[ủu]|s[âa]u|chu[ộo]t))/i.test(trimmed);
+  }
+
   return (
     lower.includes('tự tử') ||
     lower.includes('muốn chết') ||
     lower.includes('tự hại') ||
     lower.includes('rạch tay') ||
     lower.includes('kết thúc cuộc sống') ||
-    lower.includes('không muốn sống')
+    lower.includes('không muốn sống') ||
+    lower.includes('chết đi cho xong') ||
+    lower.includes('nhảy cầu') ||
+    lower.includes('nhảy lầu')
   );
 };
 
@@ -166,10 +182,13 @@ export const ChatbotView: React.FC<ChatbotViewProps> = ({
   checkinContext,
   defaultFullscreen = true
 }) => {
+  const { user } = useAuth();
+  const userId = user?.id || null;
+
   const [isFullscreen, setIsFullscreen] = useState<boolean>(defaultFullscreen);
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
     try {
-      const stored = localStorage.getItem(STORAGE_KEY);
+      const stored = localStorage.getItem(getChatStorageKey(userId));
       if (stored) return JSON.parse(stored);
     } catch {
       // ignore
@@ -190,7 +209,7 @@ export const ChatbotView: React.FC<ChatbotViewProps> = ({
   const [isLongThinking, setIsLongThinking] = useState(false);
   const [antiRepetitionMemory, setAntiRepetitionMemory] = useState<AntiRepetitionMemory>(() => {
     try {
-      const storedMem = localStorage.getItem(MEMORY_STORAGE_KEY);
+      const storedMem = localStorage.getItem(getMemoryStorageKey(userId));
       if (storedMem) return JSON.parse(storedMem);
     } catch {
       // ignore
@@ -206,6 +225,41 @@ export const ChatbotView: React.FC<ChatbotViewProps> = ({
   const inFlightRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const isNearBottomRef = useRef(true);
+  const sessionEpochRef = useRef<number>(Date.now());
+  const prevUserIdRef = useRef<string | null>(userId);
+
+  // Isolate chat history strictly per account: switch state whenever userId changes
+  useEffect(() => {
+    if (prevUserIdRef.current !== userId) {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort('USER_SWITCH');
+        abortControllerRef.current = null;
+      }
+      inFlightRef.current = false;
+      setIsThinking(false);
+      setIsLongThinking(false);
+      sessionEpochRef.current = Date.now();
+
+      // Read account-isolated history (never inherit or reassign unknown data)
+      try {
+        const stored = localStorage.getItem(getChatStorageKey(userId));
+        setMessages(stored ? JSON.parse(stored) : []);
+      } catch {
+        setMessages([]);
+      }
+
+      try {
+        const storedMem = localStorage.getItem(getMemoryStorageKey(userId));
+        setAntiRepetitionMemory(storedMem ? JSON.parse(storedMem) : { history: [] });
+      } catch {
+        setAntiRepetitionMemory({ history: [] });
+      }
+
+      setSelectedTopic(null);
+      setActiveMode('general');
+      prevUserIdRef.current = userId;
+    }
+  }, [userId]);
 
   // Dedicated Chat Container scroll function - NEVER calls window.scrollTo or scrollIntoView!
   const scrollChatToBottom = (smooth = true) => {
@@ -265,14 +319,22 @@ export const ChatbotView: React.FC<ChatbotViewProps> = ({
     }
   }, [checkinContext]);
 
-  // Sync with localStorage
+  // Sync with localStorage using account-isolated keys
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
+      localStorage.setItem(getChatStorageKey(userId), JSON.stringify(messages));
     } catch {
       // ignore
     }
-  }, [messages]);
+  }, [messages, userId]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(getMemoryStorageKey(userId), JSON.stringify(antiRepetitionMemory));
+    } catch {
+      // ignore
+    }
+  }, [antiRepetitionMemory, userId]);
 
   // Initial mount scroll only within chat container
   useEffect(() => {
@@ -388,7 +450,8 @@ export const ChatbotView: React.FC<ChatbotViewProps> = ({
   const handleSendMessage = async (
     textToSend?: string,
     overrideMode?: SupportMode,
-    retryMsgId?: string
+    retryMsgId?: string,
+    overrideTopic?: string
   ) => {
     // Prevent duplicate concurrent requests
     if (inFlightRef.current) return;
@@ -396,6 +459,8 @@ export const ChatbotView: React.FC<ChatbotViewProps> = ({
     let targetUserMsgId = retryMsgId;
     let targetText = '';
     const mode = overrideMode || activeMode;
+    const topic = overrideTopic !== undefined ? overrideTopic : selectedTopic;
+    const requestEpoch = sessionEpochRef.current;
 
     if (retryMsgId) {
       // RETRY FLOW: Do NOT create a duplicate user message!
@@ -403,7 +468,7 @@ export const ChatbotView: React.FC<ChatbotViewProps> = ({
       if (!existing) return;
       targetText = existing.text;
 
-      // Reset state of the message to sending
+      // Reset state of the existing message to sending
       setMessages((prev) =>
         prev.map((m) =>
           m.id === retryMsgId
@@ -422,7 +487,7 @@ export const ChatbotView: React.FC<ChatbotViewProps> = ({
         text: targetText,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         supportMode: mode,
-        topic: selectedTopic || undefined,
+        topic: topic || undefined,
         status: 'sending'
       };
       targetUserMsgId = userMsg.id;
@@ -445,14 +510,14 @@ export const ChatbotView: React.FC<ChatbotViewProps> = ({
       setIsLongThinking(true);
     }, 12000);
 
-    // Abort controller with generous 45s timeout
+    // Synchronized timeout: 28s matches backend 26s (13s initial + 13s retry)
     const abortCtrl = new AbortController();
     abortControllerRef.current = abortCtrl;
     const timeoutTimer = setTimeout(() => {
       try {
         abortCtrl.abort('TIMEOUT');
       } catch {}
-    }, 45000);
+    }, 28000);
 
     try {
       // Build previous messages up to this message
@@ -477,7 +542,7 @@ export const ChatbotView: React.FC<ChatbotViewProps> = ({
         body: JSON.stringify({
           messages: messagesPayload,
           supportMode: mode,
-          topic: selectedTopic || '',
+          topic: topic || '',
           recentResponseMemory: antiRepetitionMemory
         }),
         signal: abortCtrl.signal
@@ -486,28 +551,58 @@ export const ChatbotView: React.FC<ChatbotViewProps> = ({
       clearTimeout(timeoutTimer);
       clearTimeout(slowNoticeTimer);
 
-      let replyText = '';
+      // If user cleared chat during request, discard response
+      if (sessionEpochRef.current !== requestEpoch) return;
 
-      if (response.ok) {
+      if (!response.ok) {
+        let errJson: any = null;
         try {
-          const data = await response.json();
-          replyText = data?.reply || '';
-        } catch {
-          replyText = '';
-        }
-      }
+          errJson = await response.json();
+        } catch {}
 
-      // If server returned non-200 or empty, or network fallback is needed:
-      if (!replyText || typeof replyText !== 'string' || !replyText.trim()) {
-        replyText = getGentleFallbackResponse(
-          targetText,
-          mode,
-          selectedTopic || undefined,
-          messages.slice().reverse().find((m) => m.sender === 'bot')?.text
+        const classified = classifyChatError(
+          new Error(errJson?.message || errJson?.error || 'API_ERROR'),
+          response.status
         );
+
+        // Mark user message as error so user can Retry - NEVER mask with generic fake response
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === targetUserMsgId
+              ? {
+                  ...m,
+                  status: 'error',
+                  errorType: classified.type,
+                  errorMessage: errJson?.message || classified.message
+                }
+              : m
+          )
+        );
+        return;
       }
 
-      // Always mark the user message as sent smoothly
+      const data = await response.json();
+      const replyText = data?.reply || '';
+      const botSource: 'gemini' | 'fast_path' | 'fallback' | 'safety' = data?.source || 'gemini';
+
+      if (!replyText || typeof replyText !== 'string' || !replyText.trim()) {
+        const classified = classifyChatError(new Error('EMPTY_RESPONSE'));
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === targetUserMsgId
+              ? {
+                  ...m,
+                  status: 'error',
+                  errorType: classified.type,
+                  errorMessage: classified.message
+                }
+              : m
+          )
+        );
+        return;
+      }
+
+      // Mark the user message as sent successfully
       setMessages((prev) =>
         prev.map((m) =>
           m.id === targetUserMsgId
@@ -517,35 +612,36 @@ export const ChatbotView: React.FC<ChatbotViewProps> = ({
       );
 
       // Sanitize and register in anti-repetition memory
-      replyText = sanitizeChatResponse(replyText, antiRepetitionMemory);
+      const sanitizedReply = sanitizeChatResponse(replyText, antiRepetitionMemory);
       const newTurn = buildMemoryTurn(
         antiRepetitionMemory.history.length + 1,
         targetText,
-        replyText,
-        selectedTopic || undefined
+        sanitizedReply,
+        topic || undefined
       );
       const nextMemory: AntiRepetitionMemory = {
         history: [...antiRepetitionMemory.history.slice(-4), newTurn]
       };
       setAntiRepetitionMemory(nextMemory);
       try {
-        localStorage.setItem(MEMORY_STORAGE_KEY, JSON.stringify(nextMemory));
+        localStorage.setItem(getMemoryStorageKey(userId), JSON.stringify(nextMemory));
       } catch {}
 
       // Suggest modes logic
       const shouldSuggestModes =
         Boolean(
-          replyText.toLowerCase().includes('bạn muốn mình giúp theo cách nào') ||
-          replyText.toLowerCase().includes('chọn 1 trong các cách sau')
+          sanitizedReply.toLowerCase().includes('bạn muốn mình giúp theo cách nào') ||
+          sanitizedReply.toLowerCase().includes('chọn 1 trong các cách sau')
         ) && !checkIsCriticalEmergency(targetText);
 
       const botMsg: ChatMessage = {
         id: (Date.now() + 1).toString(),
         sender: 'bot',
-        text: replyText,
+        text: sanitizedReply,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         supportMode: mode,
         suggestModes: shouldSuggestModes,
+        source: botSource,
         status: 'sent'
       };
 
@@ -564,40 +660,27 @@ export const ChatbotView: React.FC<ChatbotViewProps> = ({
       clearTimeout(timeoutTimer);
       clearTimeout(slowNoticeTimer);
 
+      if (sessionEpochRef.current !== requestEpoch) return;
+
       if (abortCtrl.signal.aborted && abortCtrl.signal.reason !== 'TIMEOUT') {
-        // Deliberate user action or component unmount; do nothing
+        // Deliberate user action (e.g. clear chat or account switch); do nothing
         return;
       }
 
-      // In case of network interruption, timeout or fetch failure:
-      // Smoothly fall back to an empathetic friend response instead of a jarring network error
-      const fallbackReply = getGentleFallbackResponse(
-        targetText,
-        mode,
-        selectedTopic || undefined,
-        messages.slice().reverse().find((m) => m.sender === 'bot')?.text
-      );
-
-      // Mark user message as sent
+      // Distinguish error and show clear gentle message with Retry button
+      const classified = classifyChatError(error);
       setMessages((prev) =>
         prev.map((m) =>
           m.id === targetUserMsgId
-            ? { ...m, status: 'sent', errorMessage: undefined, errorType: undefined }
+            ? {
+                ...m,
+                status: 'error',
+                errorType: classified.type,
+                errorMessage: classified.message
+              }
             : m
         )
       );
-
-      const botMsg: ChatMessage = {
-        id: (Date.now() + 1).toString(),
-        sender: 'bot',
-        text: fallbackReply,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        supportMode: mode,
-        suggestModes: false,
-        status: 'sent'
-      };
-
-      setMessages((prev) => [...prev, botMsg]);
 
       if (isNearBottomRef.current) {
         setTimeout(() => scrollChatToBottom(true), 50);
@@ -605,14 +688,16 @@ export const ChatbotView: React.FC<ChatbotViewProps> = ({
     } finally {
       clearTimeout(timeoutTimer);
       clearTimeout(slowNoticeTimer);
-      inFlightRef.current = false;
-      setIsThinking(false);
-      setIsLongThinking(false);
-      abortControllerRef.current = null;
+      if (sessionEpochRef.current === requestEpoch) {
+        inFlightRef.current = false;
+        setIsThinking(false);
+        setIsLongThinking(false);
+        abortControllerRef.current = null;
+      }
     }
   };
 
-  // Quick Starter Click
+  // Quick Starter Click - passes topic immediately without relying on async state update
   const handleQuickStarterClick = (starter: QuickStarter) => {
     if (starter.mode) {
       setActiveMode(starter.mode);
@@ -620,7 +705,7 @@ export const ChatbotView: React.FC<ChatbotViewProps> = ({
     if (starter.category) {
       setSelectedTopic(starter.category);
     }
-    handleSendMessage(starter.prompt, starter.mode);
+    handleSendMessage(starter.prompt, starter.mode, undefined, starter.category);
   };
 
   // Load Preset Sample
@@ -641,18 +726,28 @@ export const ChatbotView: React.FC<ChatbotViewProps> = ({
       sender: 'bot',
       text: found.botReply,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      suggestModes: true
+      suggestModes: true,
+      source: 'fast_path'
     };
 
     setMessages([userMsg, botMsg]);
   };
 
-  // Clear Chat History
+  // Clear Chat History - cancels any running request and blocks stale late arrivals
   const handleClearChat = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort('CLEAR_CHAT');
+      abortControllerRef.current = null;
+    }
+    inFlightRef.current = false;
+    setIsThinking(false);
+    setIsLongThinking(false);
+    sessionEpochRef.current = Date.now();
+
     setMessages([]);
     setAntiRepetitionMemory({ history: [] });
-    localStorage.removeItem(STORAGE_KEY);
-    localStorage.removeItem(MEMORY_STORAGE_KEY);
+    localStorage.removeItem(getChatStorageKey(userId));
+    localStorage.removeItem(getMemoryStorageKey(userId));
     setShowClearConfirm(false);
     setSelectedTopic(null);
     setActiveMode('general');
@@ -1016,12 +1111,36 @@ export const ChatbotView: React.FC<ChatbotViewProps> = ({
                         : 'bg-white text-slate-800 border border-rose-100/90 rounded-bl-xs'
                     }`}
                   >
-                    {/* Optional Mode Tag */}
-                    {isBot && msg.supportMode && msg.supportMode !== 'general' && (
-                      <div className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-rose-50 text-rose-700 text-[11px] font-bold mb-2 border border-rose-100">
-                        {msg.supportMode === 'listen' && '🫂 Chế độ: Chỉ nghe mình thôi'}
-                        {msg.supportMode === 'advice' && '💡 Chế độ: Cho lời khuyên'}
-                        {msg.supportMode === 'solve' && '🧩 Chế độ: Cùng giải quyết'}
+                    {/* Optional Source / Mode Badges */}
+                    {isBot && (
+                      <div className="flex flex-wrap items-center gap-1.5 mb-2">
+                        {msg.source === 'fast_path' && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 text-[10px] font-bold border border-slate-200">
+                            ⚡ Phản hồi nhanh
+                          </span>
+                        )}
+                        {msg.source === 'gemini' && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 text-amber-800 text-[10px] font-bold border border-amber-200">
+                            ✨ Gemini AI
+                          </span>
+                        )}
+                        {msg.source === 'fallback' && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 text-[10px] font-bold border border-emerald-200">
+                            🌱 Phản hồi dự phòng
+                          </span>
+                        )}
+                        {msg.source === 'safety' && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-rose-50 text-rose-800 text-[10px] font-bold border border-rose-200">
+                            🛡️ Safe Space
+                          </span>
+                        )}
+                        {msg.supportMode && msg.supportMode !== 'general' && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 text-[10px] font-bold border border-rose-100">
+                            {msg.supportMode === 'listen' && '🫂 Chế độ: Chỉ nghe mình thôi'}
+                            {msg.supportMode === 'advice' && '💡 Chế độ: Cho lời khuyên'}
+                            {msg.supportMode === 'solve' && '🧩 Chế độ: Cùng giải quyết'}
+                          </span>
+                        )}
                       </div>
                     )}
 
@@ -1067,7 +1186,7 @@ export const ChatbotView: React.FC<ChatbotViewProps> = ({
                       <div className="flex justify-end pt-0.5">
                         <button
                           type="button"
-                          onClick={() => handleSendMessage(undefined, msg.supportMode, msg.id)}
+                          onClick={() => handleSendMessage(undefined, msg.supportMode, msg.id, msg.topic)}
                           className="px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
                         >
                           <RefreshCw className="w-3.5 h-3.5" />
@@ -1407,7 +1526,7 @@ export const ChatbotView: React.FC<ChatbotViewProps> = ({
                       onClick={() => {
                         setSelectedTopic(topic.name);
                         setIsTopicModalOpen(false);
-                        handleSendMessage(topic.starterPrompt);
+                        handleSendMessage(topic.starterPrompt, undefined, undefined, topic.name);
                       }}
                       className="text-xs font-bold text-rose-600 hover:text-rose-700 hover:underline cursor-pointer"
                     >
@@ -1424,9 +1543,10 @@ export const ChatbotView: React.FC<ChatbotViewProps> = ({
                       <button
                         key={i}
                         onClick={() => {
-                          setSelectedTopic(`${topic.name} - ${sub}`);
+                          const fullTopic = `${topic.name} - ${sub}`;
+                          setSelectedTopic(fullTopic);
                           setIsTopicModalOpen(false);
-                          handleSendMessage(`Mình đang băn khoăn về vấn đề: ${sub}.`);
+                          handleSendMessage(`Mình đang băn khoăn về vấn đề: ${sub}.`, undefined, undefined, fullTopic);
                         }}
                         className="px-2 py-1 rounded-lg bg-white text-[11px] text-slate-700 font-medium border border-slate-200 hover:border-rose-300 hover:text-rose-700 transition-colors cursor-pointer"
                       >

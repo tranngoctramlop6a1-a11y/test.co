@@ -186,6 +186,7 @@ export interface ChatMessage {
   status?: 'sending' | 'sent' | 'error';
   errorType?: 'network' | 'timeout' | 'api' | 'empty' | 'abort' | 'unknown';
   errorMessage?: string;
+  source?: 'gemini' | 'fast_path' | 'fallback' | 'safety';
 }
 
 export interface ChatTopicItem {

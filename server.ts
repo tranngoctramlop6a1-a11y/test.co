@@ -314,23 +314,7 @@ Cậu đang thấy đoạn nào làm cậu vướng nhất lúc này, kể tớ 
 
   // 4c. User asking for clarification of immediate previous bot message ("?", "là sao?", "ý là gì?", "sao cơ?", "giải thích đi", "chưa hiểu")
   if (CLARIFICATION_PATTERNS.some(p => p.test(trimmed))) {
-    if (lastBotReply) {
-      const lBot = lastBotReply.toLowerCase();
-      if (lBot.includes('ranh giới') || lBot.includes('đặt ranh giới')) {
-        return `Ý tớ là cậu có thể nói rõ điều gì cậu thấy ổn và điều gì khiến cậu không thoải mái. Ví dụ nếu bạn bè hay trêu cậu quá mức, cậu có thể nói thẳng: "Ê cái này làm tớ hơi khó chịu, đừng trêu kiểu đó nữa nha." Đơn giản là bảo vệ cảm xúc của chính mình trước đã nè!`;
-      }
-      if (lBot.includes('5 phút') || lBot.includes('bước 5 phút')) {
-        return `Ý tớ là lúc đang nản hay lười quá, cậu đừng nghĩ đến cả bài tập dài. Chỉ cần mở tập ra và làm đúng 5 phút thôi, hết 5 phút nếu vẫn mệt thì nghỉ. Thường khi bắt đầu được 5 phút là não mình đã vượt qua được cơn ngại ban đầu rồi ấy!`;
-      }
-      if (lBot.includes('suy đoán') || lBot.includes('sự kiện') || lBot.includes('tách')) {
-        return `Ý tớ là thế này nè: Sự việc thực tế (ví dụ bạn ấy chưa nhắn lại) là một chuyện, còn suy nghĩ "chắc người ta ghét mình" là do mình tự suy đoán ra rồi tự làm mình buồn thôi. Cứ bình tĩnh nhìn vào thực tế, đừng để suy đoán làm khổ mình nha!`;
-      }
-      if (lBot.includes('chia nhỏ') || lBot.includes('việc nhỏ nhất')) {
-        return `Ý tớ là thay vì cố làm cả đống thứ cùng lúc khiến đầu óc quá tải, cậu chọn đúng 1 việc dễ thở nhất làm trong 10-15 phút trước. Xong việc đó rồi hẵng tính tiếp, như vậy sẽ bớt ngợp hơn nhiều!`;
-      }
-      return `À, ý của câu vừa rồi là thế này nè: Cậu không cần phải gồng lên giải quyết mọi thứ to tát ngay lập tức đâu. Hãy thử làm một bước nhỏ nhất, thực tế nhất trước để bản thân thấy dễ chịu đã. Ví dụ như cho phép mình nghỉ ngơi 15 phút không đụng tới điện thoại, hoặc nói thật một câu ngắn gọn rõ ràng với người kia. Cậu thấy đoạn này dễ hình dung hơn chưa?`;
-    }
-    return `À, ý tớ là cậu cứ chọn một việc nhỏ nhất, dễ làm nhất trước mắt để bắt đầu, đừng để bản thân bị ngợp bởi quá nhiều thứ cùng lúc. Cậu đang thấy vướng ở điểm nào nhất, nói cho tớ nghe thêm nhé!`;
+    return `Hiện tại tớ đang tạm thời mất kết nối với AI nên chưa thể phân tích và giải thích chi tiết câu vừa rồi cho cậu được. Cậu bấm nút "Thử lại" bên dưới để tớ kết nối lại giải thích cho cậu nhé! 🫂`;
   }
 
   // 5. User answering previous bot question
@@ -568,9 +552,11 @@ app.post('/api/chat', async (req, res) => {
     // Check if Gemini is available
     const gemini = getGeminiClient();
     if (!gemini) {
-      // Use smart Vietnamese empathy engine with anti-repetition memory
-      const reply = sanitizeBotReply(generateSmartFallback(userPrompt, supportMode, lastBotReply));
-      return res.json({ reply, source: 'fallback' });
+      return res.status(503).json({
+        error: 'AI_UNAVAILABLE',
+        message: 'Trợ lý AI hiện chưa sẵn sàng. Bạn vui lòng thử lại sau nhé!',
+        source: 'error'
+      });
     }
 
     // Build context with support mode & topic
@@ -663,14 +649,30 @@ ${lastBotReply || '(Chưa có câu trả lời trước)'}
       parts: [{ text: m.content }]
     }));
 
-    try {
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('Gemini API call timed out after 25s')), 25000)
-      );
+    // Independent timeout wrapper helper that creates and cleans up individual timers
+    const executeWithIndependentTimeout = async <T>(
+      promise: Promise<T>,
+      timeoutMs: number,
+      timeoutMsg: string
+    ): Promise<T> => {
+      let timer: NodeJS.Timeout | null = null;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(timeoutMsg)), timeoutMs);
+      });
+      try {
+        return await Promise.race([promise, timeoutPromise]);
+      } finally {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+      }
+    };
 
+    try {
       let rawResponseText = '';
 
-      // 1. Try modern Gemini Flash (gemini-3.8-flash)
+      // 1. Try primary Gemini Flash (gemini-3.8-flash) with dedicated 13s timeout
       try {
         const geminiCall = gemini.models.generateContent({
           model: 'gemini-3.8-flash',
@@ -682,12 +684,16 @@ ${lastBotReply || '(Chưa có câu trả lời trước)'}
           }
         });
 
-        const response = await Promise.race([geminiCall, timeoutPromise]);
+        const response = await executeWithIndependentTimeout(
+          geminiCall,
+          13000,
+          'Gemini 3.8 Flash primary call timed out after 13s'
+        );
         rawResponseText = response.text || '';
       } catch (primaryError) {
-        console.warn('Primary Gemini Flash (gemini-3.8-flash) error, attempting fallback alias (gemini-flash-latest):', primaryError);
+        console.warn('Primary Gemini Flash (gemini-3.8-flash) failed, retrying with alias (gemini-flash-latest):', primaryError);
         
-        // 2. Retry with gemini-flash-latest alias
+        // 2. Retry with gemini-flash-latest alias with its OWN independent 13s timeout
         const retryCall = gemini.models.generateContent({
           model: 'gemini-flash-latest',
           contents: formattedContents,
@@ -697,39 +703,47 @@ ${lastBotReply || '(Chưa có câu trả lời trước)'}
             maxOutputTokens: 3500,
           }
         });
-        const retryResponse = await Promise.race([retryCall, timeoutPromise]);
+
+        const retryResponse = await executeWithIndependentTimeout(
+          retryCall,
+          13000,
+          'Gemini Flash Latest retry call timed out after 13s'
+        );
         rawResponseText = retryResponse.text || '';
       }
 
+      if (!rawResponseText || !rawResponseText.trim()) {
+        return res.status(503).json({
+          error: 'AI_EMPTY_RESPONSE',
+          message: 'AI chưa trả về nội dung phản hồi. Bạn bấm "Thử lại" nhé! 🫂',
+          source: 'error'
+        });
+      }
+
       const replyText = sanitizeBotReply(
-        rawResponseText || generateSmartFallback(userPrompt, supportMode, lastBotReply),
+        rawResponseText,
         recentResponseMemory?.history
       );
       return res.json({ reply: replyText, source: 'gemini' });
-    } catch (apiError: unknown) {
-      console.warn('Gemini API call caught error, smoothly returning warm empathetic fallback:', apiError);
-      const fallbackReply = sanitizeBotReply(
-        generateSmartFallback(userPrompt, supportMode, lastBotReply),
-        recentResponseMemory?.history
-      );
-      return res.json({ reply: fallbackReply, source: 'fallback' });
+    } catch (apiError: any) {
+      console.warn('Gemini API call failed:', apiError);
+      const isTimeout = apiError?.message?.includes('timed out');
+      return res.status(isTimeout ? 504 : 503).json({
+        error: isTimeout ? 'AI_TIMEOUT' : 'AI_CONNECTION_ERROR',
+        message: isTimeout
+          ? 'Thời gian phản hồi của AI kéo dài hơn bình thường. Bạn bấm "Thử lại" bên dưới nhé! 🫂'
+          : 'Không thể kết nối với AI vào lúc này. Bạn bấm "Thử lại" bên dưới nhé! 🫂',
+        source: 'error'
+      });
     }
 
   } catch (error: unknown) {
-    console.warn('Unexpected error in /api/chat, safely handling with warm fallback:', error);
-    try {
-      const userPrompt = req.body?.messages?.[req.body?.messages?.length - 1]?.content || '';
-      const fallbackReply = sanitizeBotReply(
-        generateSmartFallback(userPrompt, req.body?.supportMode || 'general', undefined),
-        req.body?.recentResponseMemory?.history
-      );
-      return res.json({ reply: fallbackReply, source: 'fallback' });
-    } catch {
-      return res.json({
-        reply: 'Tớ vẫn đang ở đây ngồi nghe cậu nè. Cứ thả lỏng rồi kể tiếp với tớ nhé, không cần phải diễn đạt thật hay đâu 🌿',
-        source: 'fallback'
-      });
-    }
+    console.error('Unexpected error in /api/chat:', error);
+    return res.status(500).json({
+      error: 'SERVER_ERROR',
+      message: 'Có sự cố xử lý yêu cầu lúc này. Bạn bấm "Thử lại" nhé! 🫂',
+      source: 'error'
+    });
   }
 });
 

@@ -61,10 +61,7 @@ Tớ luôn ngồi ở đây lắng nghe cậu, hãy giữ an toàn cho mình nh�
     lower.includes('chưa hiểu') ||
     lower.includes('giải thích đi')
   ) {
-    if (lastBotReply) {
-      return `À, ý của tớ vừa nãy đơn giản là: khi mình đang bị rối hoặc quá tải, thay vì cố ép bản thân phải giải quyết một việc quá lớn, mình chỉ cần làm một bước nhỏ xíu trước mắt thôi. Ví dụ như nghỉ ngơi 5 phút, uống một ngụm nước, hoặc thở đều một chút. Cậu thấy chỗ nào làm cậu lấn cấn nhất, nói lại để tớ diễn giải dễ hiểu hơn nghen! 😊`;
-    }
-    return `À ý tớ là, chúng mình không cần phải vội tìm câu trả lời ngay lúc này đâu. Cậu cứ thong thả nói về điều làm cậu thấy băn khoăn nhất nhé, tớ ở đây để cùng cậu gỡ rối từng chút một!`;
+    return `Hiện tại tớ đang tạm thời mất kết nối với AI nên chưa thể giải thích chi tiết câu vừa rồi cho cậu được. Cậu bấm nút "Thử lại" bên dưới giúp tớ nhé! 🫂`;
   }
 
   // 4. "Hôm nay tớ mệt quá", "kiệt sức", "đuối"
