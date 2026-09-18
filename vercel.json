@@ -18,7 +18,7 @@
     }
   ],
   "functions": {
-    "api/index.ts": {
+    "api/index.js": {
       "includeFiles": "server_db_store.json",
       "maxDuration": 30
     }
